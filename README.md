@@ -28,13 +28,9 @@ pip install -r requirements.txt
 Create a `.env` file in the project root with your API keys:
 
 ```bash
-# Google Maps API Key (for Places Autocomplete)
-VITE_GOOGLE_MAPS_API_KEY=AIzaSyBpzaUC2rdm66APk5MrvrqKwJttESA782I
-GMAPS_API_KEY=AIzaSyBpzaUC2rdm66APk5MrvrqKwJttESA782I
-
-# OpenWeatherMap API Key
-# Sign up at: https://home.openweathermap.org/users/sign_up
-OPENWEATHER_API_KEY=your_openweather_api_key_here
+# Copy .env.example to .env and fill in your API keys
+cp .env.example .env
+# Then edit .env with your actual API keys
 ```
 
 **Get your OpenWeatherMap API key:**

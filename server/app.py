@@ -31,78 +31,77 @@ OPENWEATHER_API_KEY = os.environ.get("OPENWEATHER_API_KEY")
 
 
 def get_openweather(lat: float, lon: float):
-    try:
-        url = "https://api.open-meteo.com/v1/forecast"
-        params = {
-            "latitude": lat,
-            "longitude": lon,
-            "daily": "temperature_2m_mean,precipitation_sum",
-            "forecast_days": 7,
-            "timezone": "auto",
-        }
-        r = requests.get(url, params=params, timeout=10)
-        r.raise_for_status()
-        return r.json()
-    except Exception:
-        return {
-            "daily": {
-                "temperature_2m_mean": [24, 25, 23, 22, 26, 24, 23],
-                "precipitation_sum": [5, 12, 0, 20, 3, 0, 15],
-            },
-            "error": "weather_fetch_failed",
-        }
+    if not OPENWEATHER_API_KEY or OPENWEATHER_API_KEY == "your_openweather_api_key_here":
+        raise ValueError("OPENWEATHER_API_KEY not configured in .env file")
+    
+    url = "https://api.openweathermap.org/data/2.5/forecast"
+    params = {"lat": lat, "lon": lon, "appid": OPENWEATHER_API_KEY, "units": "metric"}
+    r = requests.get(url, params=params, timeout=10)
+    r.raise_for_status()
+    data = r.json()
+    
+    daily_temps, daily_rain = [], []
+    current_day, day_temps, day_rain = None, [], 0
+    
+    for item in data.get("list", []):
+        day = item.get("dt_txt", "").split()[0]
+        if day != current_day and current_day:
+            if day_temps:
+                daily_temps.append(sum(day_temps) / len(day_temps))
+            daily_rain.append(day_rain)
+            day_temps, day_rain = [], 0
+        current_day = day
+        if item.get("main", {}).get("temp"):
+            day_temps.append(item["main"]["temp"])
+        day_rain += item.get("rain", {}).get("3h", 0)
+    
+    if day_temps:
+        daily_temps.append(sum(day_temps) / len(day_temps))
+    daily_rain.append(day_rain)
+    
+    return {"daily": {"temperature_2m_mean": daily_temps, "precipitation_sum": daily_rain}}
 
 
 def get_soilgrids(lat: float, lon: float):
     try:
-        base = "https://rest.isric.org/soilgrids/v2.0/properties/query"
-        params = {
-            "lat": lat,
-            "lon": lon,
-            "property": "phh2o",
-            "depth": "0-5cm",
-            "value": "mean",
-        }
-        r = requests.get(base, params=params, timeout=10)
+        url = "https://rest.isric.org/soilgrids/v2.0/properties/query"
+        params = {"lat": lat, "lon": lon, "property": "phh2o", "depth": "0-5cm", "value": "mean"}
+        r = requests.get(url, params=params, timeout=10)
         r.raise_for_status()
-        gj = r.json()
-        layers = gj.get("properties", {}).get("layers", [])
-        ph = None
+        data = r.json()
+        
+        layers = data.get("properties", {}).get("layers", [])
         if layers:
             depths = layers[0].get("depths", [])
             if depths:
-                values = depths[0].get("values", {})
-                mapped = values.get("mean")
-                if mapped is not None:
-                    ph = mapped / 10.0
-        return {"ph": ph, "raw": gj}
+                ph_value = depths[0].get("values", {}).get("mean")
+                if ph_value is not None:
+                    return {"ph": ph_value / 10.0}
     except Exception:
-        return {"ph": None, "error": "soil_fetch_failed"}
+        pass
+    
+    # Fallback: Regional pH estimates based on latitude
+    # Tropical regions (0-23°): slightly acidic 6.0-6.5
+    # Temperate regions (23-40°): neutral 6.5-7.5
+    # Arid regions (varies): alkaline 7.5-8.5
+    abs_lat = abs(lat)
+    if abs_lat < 23:
+        estimated_ph = 6.2  # Tropical
+    elif abs_lat < 40:
+        estimated_ph = 7.0  # Temperate
+    else:
+        estimated_ph = 7.5  # Higher latitudes
+    
+    return {"ph": estimated_ph, "estimated": True}
 
 
 def summarize_weather(weather):
-    daily_obj = weather.get("daily")
-    avg_temp = None
-    rainfall_mm = None
-    if isinstance(daily_obj, dict):
-        temps = daily_obj.get("temperature_2m_mean") or []
-        rain = daily_obj.get("precipitation_sum") or []
-        if temps:
-            avg_temp = sum(t for t in temps if isinstance(t, (int, float))) / len(temps)
-        if rain:
-            rainfall_mm = sum(r for r in rain if isinstance(r, (int, float)))
-    else:
-        daily_list = weather.get("daily", [])
-        temps = [d.get("temp", {}).get("day") for d in daily_list if d.get("temp", {}).get("day") is not None]
-        avg_temp = sum(temps) / len(temps) if temps else weather.get("current", {}).get("temp")
-        rainfall_mm = 0.0
-        for d in daily_list:
-            r = d.get("rain")
-            if isinstance(r, (int, float)):
-                rainfall_mm += r
+    daily = weather.get("daily", {})
+    temps = daily.get("temperature_2m_mean", [])
+    rain = daily.get("precipitation_sum", [])
     return {
-        "avg_temp_c": avg_temp,
-        "weekly_rain_mm": rainfall_mm,
+        "avg_temp_c": sum(temps) / len(temps) if temps else None,
+        "weekly_rain_mm": sum(rain) if rain else None,
     }
 
 
@@ -110,28 +109,21 @@ def recommend_crops(weather_summary, soil):
     temp = weather_summary.get("avg_temp_c")
     rain = weather_summary.get("weekly_rain_mm")
     ph = soil.get("ph")
-
-    recs = []
-
+    
     if temp is None or rain is None or ph is None:
-        return [{"crop": "insufficient-data", "reason": "Missing temp/rain/pH"}]
-
+        raise ValueError("Missing required data for crop recommendation")
+    
+    recs = []
     if rain >= 100 and 20 <= temp <= 32 and 5.5 <= ph <= 6.5:
         recs.append({"crop": "rice", "reason": "high rainfall, warm temp, mildly acidic pH"})
-
     if 10 <= rain <= 60 and 12 <= temp <= 25 and 6.0 <= ph <= 7.5:
         recs.append({"crop": "wheat", "reason": "moderate rainfall, cool temp, neutral pH"})
-
     if rain <= 40 and 18 <= temp <= 35 and 6.0 <= ph <= 7.5:
-        recs.append({"crop": "millet", "reason": "low rainfall tolerance, warm temp, neutral pH"})
-
+        recs.append({"crop": "millet", "reason": "low rainfall, warm temp, neutral pH"})
     if 40 <= rain <= 120 and 18 <= temp <= 30 and 5.5 <= ph <= 7.0:
         recs.append({"crop": "maize", "reason": "moderate rainfall, warm temp, slightly acidic pH"})
-
-    if not recs:
-        recs.append({"crop": "local-advisory", "reason": "No rule matched; consult regional guidelines"})
-
-    return recs
+    
+    return recs if recs else [{"crop": "none", "reason": f"No suitable crops (T:{temp:.1f}°C, R:{rain:.0f}mm, pH:{ph:.1f})"}]
 
 
 @app.route("/")
@@ -145,19 +137,32 @@ def insights():
         lat = float(request.args.get("lat"))
         lon = float(request.args.get("lon"))
     except (TypeError, ValueError):
-        return jsonify({"error": "invalid_lat_lon"}), 400
-
-    weather = get_openweather(lat, lon)
-    soil = get_soilgrids(lat, lon)
-    summary = summarize_weather(weather)
-    recs = recommend_crops(summary, soil)
-
-    return jsonify({
-        "location": {"lat": lat, "lon": lon},
-        "weather": summary,
-        "soil": {"ph": soil.get("ph")},
-        "recommendations": recs,
-    })
+        return jsonify({"error": "Invalid latitude/longitude"}), 400
+    
+    try:
+        weather = get_openweather(lat, lon)
+        soil = get_soilgrids(lat, lon)
+        summary = summarize_weather(weather)
+        recs = recommend_crops(summary, soil)
+        
+        response = {
+            "location": {"lat": lat, "lon": lon},
+            "weather": summary,
+            "soil": {"ph": soil.get("ph")},
+            "recommendations": recs,
+        }
+        
+        # Add note if soil pH is estimated
+        if soil.get("estimated"):
+            response["note"] = "Soil pH estimated based on regional climate (SoilGrids data unavailable)"
+        
+        return jsonify(response)
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"API request failed: {str(e)}"}), 503
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
 
 
 @app.route("/static/<path:path>")
